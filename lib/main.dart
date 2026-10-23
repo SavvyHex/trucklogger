@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as image_tools;
 
@@ -330,7 +331,13 @@ class _VideoRecordingScreenState extends State<VideoRecordingScreen> {
   @override
   void initState() {
     super.initState();
-    _initializeCamera();
+    _prepareRecorder();
+  }
+
+  Future<void> _prepareRecorder() async {
+    await SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
+    if (!mounted) return;
+    await _initializeCamera();
   }
 
   Future<void> _initializeCamera() async {
@@ -339,6 +346,12 @@ class _VideoRecordingScreenState extends State<VideoRecordingScreen> {
       if (cameras.isEmpty) throw CameraException('No camera', 'No camera was found on this device.');
       final camera = CameraController(cameras.first, ResolutionPreset.high, enableAudio: true);
       await camera.initialize();
+      await SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      await camera.unlockCaptureOrientation();
       if (!mounted) {
         await camera.dispose();
         return;
@@ -355,6 +368,7 @@ class _VideoRecordingScreenState extends State<VideoRecordingScreen> {
   @override
   void dispose() {
     _camera?.dispose();
+    SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
     super.dispose();
   }
 
@@ -385,7 +399,7 @@ class _VideoRecordingScreenState extends State<VideoRecordingScreen> {
             ? Padding(padding: const EdgeInsets.all(24), child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white)))
             : _loading || camera == null
                 ? const CircularProgressIndicator(color: Colors.white)
-                : AspectRatio(aspectRatio: camera.value.aspectRatio, child: CameraPreview(camera)))),
+                : CameraPreview(camera))),
         Container(
           color: Colors.white,
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 26),
@@ -407,14 +421,24 @@ class _VideoCaptureCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(color: Colors.white, border: Border.all(color: const Color(0xffdbe2df)), borderRadius: BorderRadius.circular(8)),
-      child: Padding(padding: const EdgeInsets.all(10), child: Row(children: [
+    return Material(
+      key: const ValueKey('truck-video-card'),
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onRecord,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          decoration: BoxDecoration(border: Border.all(color: const Color(0xffdbe2df)), borderRadius: BorderRadius.circular(8)),
+          padding: const EdgeInsets.all(10),
+          child: Row(children: [
           Icon(hasVideo ? Icons.check_circle : Icons.videocam_outlined, size: 16, color: const Color(0xff087866)),
           const SizedBox(width: 8),
           Expanded(child: Text(hasVideo ? 'Video recorded' : 'No video recorded', style: const TextStyle(fontSize: 11))),
           TextButton(onPressed: onRecord, child: Text(hasVideo ? 'Retake' : 'Record')),
-        ])),
+        ]),
+        ),
+      ),
     );
   }
 }
@@ -808,7 +832,7 @@ class DetailScreen extends StatelessWidget {
   const DetailScreen({super.key, required this.log});
   final TruckLog log;
   @override
-  Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Truck entry', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700))), body: ListView(padding: const EdgeInsets.all(16), children: [Container(height: 190, decoration: BoxDecoration(color: const Color(0xff10231f), borderRadius: BorderRadius.circular(8)), child: const Center(child: CircleAvatar(radius: 24, backgroundColor: Colors.white, child: Icon(Icons.play_arrow, color: Color(0xff10231f), size: 28)))), const SizedBox(height: 8), const Text('0:00 / 0:14 · uploaded 10:43 AM', style: TextStyle(fontSize: 9, color: Color(0xff72807b))), const SizedBox(height: 12), Row(children: [Text(log.plate, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, letterSpacing: 1)), const SizedBox(width: 10), const _StatusPill()]), const Divider(height: 32), _DetailRow('Party name', log.party), _DetailRow('Logged by', '${log.driver} · ${log.time}'), const SizedBox(height: 14), const Text('Materials', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)), const SizedBox(height: 6), ...log.materials.map((material) => Padding(padding: const EdgeInsets.symmetric(vertical: 7), child: Text(material, style: const TextStyle(fontSize: 11))))]));
+  Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Truck entry', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700))), body: ListView(padding: const EdgeInsets.all(16), children: [Container(height: 190, decoration: BoxDecoration(color: const Color(0xff10231f), borderRadius: BorderRadius.circular(8)), child: const Center(child: CircleAvatar(radius: 24, backgroundColor: Colors.white, child: Icon(Icons.play_arrow, color: Color(0xff10231f), size: 28)))), const SizedBox(height: 8), const Text('Video uploaded 10:43 AM', style: TextStyle(fontSize: 9, color: Color(0xff72807b))), const SizedBox(height: 12), Row(children: [Text(log.plate, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, letterSpacing: 1)), const SizedBox(width: 10), const _StatusPill()]), const Divider(height: 32), _DetailRow('Party name', log.party), _DetailRow('Logged by', '${log.driver} · ${log.time}'), const SizedBox(height: 14), const Text('Materials', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)), const SizedBox(height: 6), ...log.materials.map((material) => Padding(padding: const EdgeInsets.symmetric(vertical: 7), child: Text(material, style: const TextStyle(fontSize: 11))))]));
 }
 
 class _StatusPill extends StatelessWidget {

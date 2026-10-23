@@ -56,6 +56,14 @@ void main() {
     expect(find.byType(DropdownButtonFormField<String>), findsNWidgets(3));
   });
 
+  testWidgets('renders the dedicated video recorder', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: VideoRecordingScreen()));
+    await tester.pump();
+
+    expect(find.text('Record truck video'), findsOneWidget);
+    expect(find.text('Start recording'), findsOneWidget);
+  });
+
   testWidgets('opens a truck detail from the log list', (tester) async {
     await tester.pumpWidget(const TruckLoggerApp());
     await tester.tap(find.text('GJ 37 V 0562'));
