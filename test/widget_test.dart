@@ -30,14 +30,30 @@ void main() {
 
   testWidgets('opens the new truck entry flow', (tester) async {
     await tester.pumpWidget(const TruckLoggerApp());
+    await tester.pump();
     await tester.tap(find.text('New truck'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
 
     expect(find.text('New truck entry'), findsOneWidget);
     expect(find.text('Plate number'), findsOneWidget);
     await tester.drag(find.byType(ListView), const Offset(0, -500));
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('Save entry'), findsOneWidget);
+  });
+
+  testWidgets('adds another material row', (tester) async {
+    await tester.pumpWidget(const TruckLoggerApp());
+    await tester.pump();
+    await tester.tap(find.text('New truck'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(find.byType(DropdownButtonFormField<String>), findsNWidgets(2));
+    await tester.tap(find.text('Add material'));
+    await tester.pump();
+
+    expect(find.byType(DropdownButtonFormField<String>), findsNWidgets(3));
   });
 
   testWidgets('opens a truck detail from the log list', (tester) async {
