@@ -412,14 +412,17 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
         ),
       );
       final result = await recognizer.processImage(input);
-      final candidates = result.blocks.where(_looksLikePlate).toList();
+      final candidates = result.blocks.where(_looksLikePlate).toList()
+        ..sort((first, second) => _candidateScore(second).compareTo(_candidateScore(first)));
       if (!mounted) return;
       setState(() {
         _liveImageSize = Size(frame.width.toDouble(), frame.height.toDouble());
         _livePlateCorners = candidates.isEmpty ? null : _cornersFor(candidates.first);
       });
     } catch (_) {
-      // Live detection is best effort; capture and manual entry remain available.
+      if (mounted && !_capturing) {
+        setState(() => _livePlateCorners = null);
+      }
     } finally {
       _processingFrame = false;
     }
@@ -438,14 +441,29 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
   bool _looksLikePlate(TextBlock block) {
     if (block.cornerPoints.length < 4) return false;
     final corners = _cornersFor(block);
-    final width = _distance(corners[0], corners[1]);
-    final height = _distance(corners[1], corners[2]);
+    final width = math.max(_distance(corners[0], corners[1]), _distance(corners[2], corners[3]));
+    final height = math.max(_distance(corners[1], corners[2]), _distance(corners[3], corners[0]));
     final aspectRatio = width / height;
     final plate = normalizePlateText(block.text);
     return aspectRatio >= 2.2 && aspectRatio <= 12 && isValidIndianPlate(plate) && _isInsideGuide(corners);
   }
 
-  List<math.Point<double>> _cornersFor(TextBlock block) => block.cornerPoints.map((point) => math.Point(point.x.toDouble(), point.y.toDouble())).toList();
+  List<math.Point<double>> _cornersFor(TextBlock block) {
+    final points = block.cornerPoints.take(4).map((point) => math.Point(point.x.toDouble(), point.y.toDouble())).toList();
+    final centerX = points.map((point) => point.x).reduce((a, b) => a + b) / points.length;
+    final centerY = points.map((point) => point.y).reduce((a, b) => a + b) / points.length;
+    points.sort((first, second) => math.atan2(first.y - centerY, first.x - centerX).compareTo(math.atan2(second.y - centerY, second.x - centerX)));
+    return points;
+  }
+
+  double _candidateScore(TextBlock block) {
+    final corners = _cornersFor(block);
+    final source = _liveImageSize;
+    if (source == null) return 0;
+    final center = _polygonCenter(corners);
+    final guideCenter = math.Point<double>(source.width / 2, source.height / 2);
+    return 1 / (1 + _distance(center, guideCenter));
+  }
 
   double _distance(math.Point<double> first, math.Point<double> second) {
     final dx = first.x - second.x;
@@ -459,12 +477,13 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
     final rotated = corners.map((point) => _rotatePoint(point, source)).toList();
     final rotatedSize = _rotatedSize(source);
     final guide = Rect.fromLTWH(rotatedSize.width * .1, rotatedSize.height * .35, rotatedSize.width * .8, rotatedSize.height * .3);
-    final center = math.Point<double>(
-      rotated.map((point) => point.x).reduce((a, b) => a + b) / rotated.length,
-      rotated.map((point) => point.y).reduce((a, b) => a + b) / rotated.length,
-    );
-    return guide.contains(Offset(center.x, center.y));
+    return rotated.every((point) => guide.contains(Offset(point.x, point.y)));
   }
+
+  math.Point<double> _polygonCenter(List<math.Point<double>> points) => math.Point<double>(
+    points.map((point) => point.x).reduce((a, b) => a + b) / points.length,
+    points.map((point) => point.y).reduce((a, b) => a + b) / points.length,
+  );
 
   math.Point<double> _rotatePoint(math.Point<double> point, Size source) {
     return switch (_camera?.description.sensorOrientation ?? 90) {
@@ -520,10 +539,10 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
       body: Column(children: [
         Expanded(child: Stack(alignment: Alignment.center, children: [
           if (_imagePath != null) Positioned.fill(child: Image.file(File(_imagePath!), fit: BoxFit.cover)),
-          if (_imagePath == null && _camera?.value.isInitialized == true) Positioned.fill(child: CameraPreview(_camera!)),
+          if (_imagePath == null && _camera?.value.isInitialized == true) Center(child: CameraPreview(_camera!)),
           if (_imagePath == null && _camera == null && _error == null) const CircularProgressIndicator(color: Colors.white),
           if (_imagePath == null && _camera == null && _error != null) Padding(padding: const EdgeInsets.all(24), child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white))),
-          if (_imagePath == null && _camera?.value.isInitialized == true) IgnorePointer(child: CustomPaint(size: Size.infinite, painter: _CameraOverlayPainter(corners: _livePlateCorners, imageSize: _liveImageSize, sensorOrientation: _camera!.description.sensorOrientation))),
+          if (_imagePath == null && _camera?.value.isInitialized == true) Center(child: IgnorePointer(child: AspectRatio(aspectRatio: 1 / _camera!.value.aspectRatio, child: CustomPaint(painter: _CameraOverlayPainter(corners: _livePlateCorners, imageSize: _liveImageSize, sensorOrientation: _camera!.description.sensorOrientation))))),
         ])),
         Container(color: Colors.white, padding: const EdgeInsets.fromLTRB(16, 16, 16, 26), child: hasCapture ? _confirmationPanel(context) : _capturePanel(context)),
       ]),
@@ -593,7 +612,10 @@ class _CameraOverlayPainter extends CustomPainter {
       }
     }
     path.close();
+    canvas.save();
+    canvas.clipRRect(RRect.fromRectAndRadius(guide, const Radius.circular(8)));
     canvas.drawPath(path, detectedPaint);
+    canvas.restore();
   }
 
   @override
