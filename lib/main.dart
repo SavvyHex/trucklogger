@@ -309,7 +309,7 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
   bool _capturing = false;
   bool _streaming = false;
   bool _processingFrame = false;
-  Rect? _livePlateBox;
+  List<math.Point<double>>? _livePlateCorners;
   Size? _liveImageSize;
 
   @override
@@ -416,7 +416,7 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
       if (!mounted) return;
       setState(() {
         _liveImageSize = Size(frame.width.toDouble(), frame.height.toDouble());
-        _livePlateBox = candidates.isEmpty ? null : candidates.first.boundingBox;
+        _livePlateCorners = candidates.isEmpty ? null : _cornersFor(candidates.first);
       });
     } catch (_) {
       // Live detection is best effort; capture and manual entry remain available.
@@ -436,11 +436,48 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
   }
 
   bool _looksLikePlate(TextBlock block) {
-    final width = block.boundingBox.width;
-    final height = block.boundingBox.height;
+    if (block.cornerPoints.length < 4) return false;
+    final corners = _cornersFor(block);
+    final width = _distance(corners[0], corners[1]);
+    final height = _distance(corners[1], corners[2]);
     final aspectRatio = width / height;
     final plate = normalizePlateText(block.text);
-    return aspectRatio >= 2.2 && aspectRatio <= 12 && isValidIndianPlate(plate);
+    return aspectRatio >= 2.2 && aspectRatio <= 12 && isValidIndianPlate(plate) && _isInsideGuide(corners);
+  }
+
+  List<math.Point<double>> _cornersFor(TextBlock block) => block.cornerPoints.map((point) => math.Point(point.x.toDouble(), point.y.toDouble())).toList();
+
+  double _distance(math.Point<double> first, math.Point<double> second) {
+    final dx = first.x - second.x;
+    final dy = first.y - second.y;
+    return math.sqrt(dx * dx + dy * dy);
+  }
+
+  bool _isInsideGuide(List<math.Point<double>> corners) {
+    final source = _liveImageSize;
+    if (source == null) return false;
+    final rotated = corners.map((point) => _rotatePoint(point, source)).toList();
+    final rotatedSize = _rotatedSize(source);
+    final guide = Rect.fromLTWH(rotatedSize.width * .1, rotatedSize.height * .35, rotatedSize.width * .8, rotatedSize.height * .3);
+    final center = math.Point<double>(
+      rotated.map((point) => point.x).reduce((a, b) => a + b) / rotated.length,
+      rotated.map((point) => point.y).reduce((a, b) => a + b) / rotated.length,
+    );
+    return guide.contains(Offset(center.x, center.y));
+  }
+
+  math.Point<double> _rotatePoint(math.Point<double> point, Size source) {
+    return switch (_camera?.description.sensorOrientation ?? 90) {
+      0 => point,
+      180 => math.Point(source.width - point.x, source.height - point.y),
+      270 => math.Point(source.height - point.y, point.x),
+      _ => math.Point(point.y, source.width - point.x),
+    };
+  }
+
+  Size _rotatedSize(Size source) {
+    final orientation = _camera?.description.sensorOrientation ?? 90;
+    return orientation == 90 || orientation == 270 ? Size(source.height, source.width) : source;
   }
 
   Future<String> _createGuideRegionImage(String sourcePath) async {
@@ -465,7 +502,7 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
 
   void _retake() {
     _plateController?.dispose();
-    setState(() { _imagePath = null; _plateController = null; _error = null; });
+    setState(() { _imagePath = null; _plateController = null; _error = null; _livePlateCorners = null; });
     final camera = _camera;
     if (camera != null && camera.value.isInitialized && !_streaming) {
       camera.startImageStream(_processLiveFrame).then((_) {
@@ -486,7 +523,7 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
           if (_imagePath == null && _camera?.value.isInitialized == true) Positioned.fill(child: CameraPreview(_camera!)),
           if (_imagePath == null && _camera == null && _error == null) const CircularProgressIndicator(color: Colors.white),
           if (_imagePath == null && _camera == null && _error != null) Padding(padding: const EdgeInsets.all(24), child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white))),
-          if (_imagePath == null && _camera?.value.isInitialized == true) IgnorePointer(child: CustomPaint(size: Size.infinite, painter: _CameraOverlayPainter(box: _livePlateBox, imageSize: _liveImageSize, sensorOrientation: _camera!.description.sensorOrientation))),
+          if (_imagePath == null && _camera?.value.isInitialized == true) IgnorePointer(child: CustomPaint(size: Size.infinite, painter: _CameraOverlayPainter(corners: _livePlateCorners, imageSize: _liveImageSize, sensorOrientation: _camera!.description.sensorOrientation))),
         ])),
         Container(color: Colors.white, padding: const EdgeInsets.fromLTRB(16, 16, 16, 26), child: hasCapture ? _confirmationPanel(context) : _capturePanel(context)),
       ]),
@@ -495,7 +532,7 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
   Widget _capturePanel(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
     const Text('Fit the whole plate inside the box', textAlign: TextAlign.center, style: TextStyle(fontSize: 10, color: Color(0xff596862))),
     const SizedBox(height: 12),
-    FilledButton.icon(onPressed: _capturing ? null : _capture, icon: const Icon(Icons.camera_alt_outlined), label: Text(_capturing ? 'Reading plate...' : _livePlateBox == null ? 'Capture plate' : 'Plate detected · Capture')),
+    FilledButton.icon(onPressed: _capturing ? null : _capture, icon: const Icon(Icons.camera_alt_outlined), label: Text(_capturing ? 'Reading plate...' : _livePlateCorners == null ? 'Capture plate' : 'Plate detected · Capture')),
     if (_error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 10, color: Colors.red))),
   ]);
 
@@ -511,8 +548,8 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
 }
 
 class _CameraOverlayPainter extends CustomPainter {
-  const _CameraOverlayPainter({required this.box, required this.imageSize, required this.sensorOrientation});
-  final Rect? box;
+  const _CameraOverlayPainter({required this.corners, required this.imageSize, required this.sensorOrientation});
+  final List<math.Point<double>>? corners;
   final Size? imageSize;
   final int sensorOrientation;
 
@@ -530,30 +567,37 @@ class _CameraOverlayPainter extends CustomPainter {
     final guide = Rect.fromLTWH(size.width * .1, size.height * .35, size.width * .8, size.height * .3);
     canvas.drawRRect(RRect.fromRectAndRadius(guide, const Radius.circular(8)), guidePaint);
 
-    final detected = box;
+    final detected = corners;
     final source = imageSize;
     if (detected == null || source == null || source.width == 0 || source.height == 0) return;
-    final rotated = switch (sensorOrientation) {
-      0 => detected,
-      180 => Rect.fromLTRB(source.width - detected.right, source.height - detected.bottom, source.width - detected.left, source.height - detected.top),
-      270 => Rect.fromLTRB(source.height - detected.bottom, detected.left, source.height - detected.top, detected.right),
-      _ => Rect.fromLTRB(detected.top, source.width - detected.right, detected.bottom, source.width - detected.left),
-    };
+    final rotated = detected.map((point) {
+      return switch (sensorOrientation) {
+        0 => point,
+        180 => math.Point(source.width - point.x, source.height - point.y),
+        270 => math.Point(source.height - point.y, point.x),
+        _ => math.Point(point.y, source.width - point.x),
+      };
+    }).toList();
     final rotatedSize = sensorOrientation == 90 || sensorOrientation == 270 ? Size(source.height, source.width) : source;
     final scale = math.max(size.width / rotatedSize.width, size.height / rotatedSize.height);
     final offsetX = (size.width - rotatedSize.width * scale) / 2;
     final offsetY = (size.height - rotatedSize.height * scale) / 2;
-    final mapped = Rect.fromLTRB(
-      rotated.left * scale + offsetX,
-      rotated.top * scale + offsetY,
-      rotated.right * scale + offsetX,
-      rotated.bottom * scale + offsetY,
-    );
-    canvas.drawRRect(RRect.fromRectAndRadius(mapped, const Radius.circular(6)), detectedPaint);
+    final path = Path();
+    for (var index = 0; index < rotated.length; index++) {
+      final point = rotated[index];
+      final mapped = Offset(point.x * scale + offsetX, point.y * scale + offsetY);
+      if (index == 0) {
+        path.moveTo(mapped.dx, mapped.dy);
+      } else {
+        path.lineTo(mapped.dx, mapped.dy);
+      }
+    }
+    path.close();
+    canvas.drawPath(path, detectedPaint);
   }
 
   @override
-  bool shouldRepaint(covariant _CameraOverlayPainter oldDelegate) => oldDelegate.box != box || oldDelegate.imageSize != imageSize || oldDelegate.sensorOrientation != sensorOrientation;
+  bool shouldRepaint(covariant _CameraOverlayPainter oldDelegate) => oldDelegate.corners != corners || oldDelegate.imageSize != imageSize || oldDelegate.sensorOrientation != sensorOrientation;
 }
 
 class PendingUploadsScreen extends StatelessWidget {
