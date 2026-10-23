@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as image_tools;
 
@@ -246,9 +247,27 @@ class _NewEntryScreenState extends State<NewEntryScreen> {
   final _plate = TextEditingController(text: 'GJ 37 V 0562');
   final _party = TextEditingController(text: 'Islami Sea Food');
   final _ice = TextEditingController(text: '200');
-  bool _recorded = false;
+  final List<Map<String, String>> _materials = [
+    {'name': 'Fish mix', 'quantity': '10'},
+    {'name': 'Small fish', 'quantity': '60'},
+  ];
+  XFile? _recordedVideo;
+
   @override
-  void dispose() { _plate.dispose(); _party.dispose(); _ice.dispose(); super.dispose(); }
+  void dispose() {
+    _plate.dispose();
+    _party.dispose();
+    _ice.dispose();
+    super.dispose();
+  }
+
+  void _addMaterial() => setState(() => _materials.add({'name': 'Select Material', 'quantity': ''}));
+
+  void _removeMaterial(int index) {
+    if (_materials.length == 1) return;
+    setState(() => _materials.removeAt(index));
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(leading: const BackButton(), title: const Text('New truck entry', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
@@ -257,16 +276,28 @@ class _NewEntryScreenState extends State<NewEntryScreen> {
       TextField(controller: _plate, decoration: InputDecoration(suffixIcon: IconButton(onPressed: () => _showScanner(context), icon: const Icon(Icons.document_scanner_outlined)))),
       const _Hint('Scan the plate with the camera, or type it'),
       const _FieldLabel('Party name'), TextField(controller: _party),
-      const _FieldLabel('Materials'), const _MaterialLine(name: 'Fish mix', quantity: '10'), const _MaterialLine(name: 'Small fish', quantity: '60'),
-      TextButton.icon(onPressed: () {}, icon: const Icon(Icons.add, size: 15), label: const Text('Add material', style: TextStyle(fontSize: 11)), style: TextButton.styleFrom(alignment: Alignment.centerLeft, padding: EdgeInsets.zero)),
+      const _FieldLabel('Materials'),
+      ..._materials.asMap().entries.map((entry) => _MaterialLine(
+        key: ValueKey('material-${entry.key}'),
+        name: entry.value['name']!,
+        quantity: entry.value['quantity']!,
+        onNameChanged: (value) => _materials[entry.key]['name'] = value,
+        onQuantityChanged: (value) => _materials[entry.key]['quantity'] = value,
+        onRemove: () => _removeMaterial(entry.key),
+      )),
+      TextButton.icon(onPressed: _addMaterial, icon: const Icon(Icons.add, size: 15), label: const Text('Add material', style: TextStyle(fontSize: 11)), style: TextButton.styleFrom(alignment: Alignment.centerLeft, padding: EdgeInsets.zero)),
       const _FieldLabel('Ice (kg)'), TextField(controller: _ice, keyboardType: TextInputType.number, decoration: const InputDecoration(suffixText: 'kg')),
       const _FieldLabel('Truck video'),
-      InkWell(onTap: () => setState(() => _recorded = true), child: Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.white, border: Border.all(color: const Color(0xffdbe2df)), borderRadius: BorderRadius.circular(8)), child: Row(children: [Icon(_recorded ? Icons.check_circle : Icons.videocam_outlined, color: const Color(0xff087866)), const SizedBox(width: 10), Expanded(child: Text(_recorded ? '0:14 recorded' : 'Tap to record truck video', style: const TextStyle(fontSize: 11))), TextButton(onPressed: () => setState(() => _recorded = false), child: Text(_recorded ? 'Retake' : 'Record'))]))),
-      const _FieldLabel('Note (optional)'), const TextField(decoration: InputDecoration(hintText: 'Anything worth recording')), const SizedBox(height: 24),
+      _VideoCaptureCard(hasVideo: _recordedVideo != null, onRecord: _openRecorder),
+      const _FieldLabel('Note (optional)'), const TextField(decoration: InputDecoration(hintText: 'Anything worth recording', hintStyle: TextStyle(color: Color(0xffaab4af)))), const SizedBox(height: 24),
       FilledButton(onPressed: () => _save(context), child: const Text('Save entry')),
     ]),
   );
   void _showScanner(BuildContext context) => Navigator.push(context, MaterialPageRoute(builder: (_) => ScanPlateScreen(onPlate: (plate) { _plate.text = plate; setState(() {}); })));
+  Future<void> _openRecorder() async {
+    final video = await Navigator.push<XFile>(context, MaterialPageRoute(builder: (_) => const VideoRecordingScreen()));
+    if (video != null && mounted) setState(() => _recordedVideo = video);
+  }
   void _save(BuildContext context) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Entry saved. Video will upload in the background.'))); Navigator.pop(context); }
 }
 
@@ -284,12 +315,143 @@ class _Hint extends StatelessWidget {
   Widget build(BuildContext context) => Padding(padding: const EdgeInsets.only(top: 5), child: Text(text, style: const TextStyle(fontSize: 9, color: Color(0xff85918c))));
 }
 
+class VideoRecordingScreen extends StatefulWidget {
+  const VideoRecordingScreen({super.key});
+
+  @override
+  State<VideoRecordingScreen> createState() => _VideoRecordingScreenState();
+}
+
+class _VideoRecordingScreenState extends State<VideoRecordingScreen> {
+  CameraController? _camera;
+  bool _loading = true;
+  bool _recording = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _prepareRecorder();
+  }
+
+  Future<void> _prepareRecorder() async {
+    await SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
+    if (!mounted) return;
+    await _initializeCamera();
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) throw CameraException('No camera', 'No camera was found on this device.');
+      final camera = CameraController(cameras.first, ResolutionPreset.high, enableAudio: true);
+      await camera.initialize();
+      await SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      await camera.unlockCaptureOrientation();
+      if (!mounted) {
+        await camera.dispose();
+        return;
+      }
+      setState(() {
+        _camera = camera;
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() { _loading = false; _error = 'Camera unavailable. Check camera and microphone permissions.'; });
+    }
+  }
+
+  @override
+  void dispose() {
+    _camera?.dispose();
+    SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
+    super.dispose();
+  }
+
+  Future<void> _toggleRecording() async {
+    final camera = _camera;
+    if (camera == null || !camera.value.isInitialized) return;
+    if (_recording) {
+      final video = await camera.stopVideoRecording();
+      if (mounted) Navigator.pop(context, video);
+      return;
+    }
+    await camera.startVideoRecording();
+    if (mounted) setState(() => _recording = true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final camera = _camera;
+    return Scaffold(
+      backgroundColor: const Color(0xff0b1714),
+      appBar: AppBar(
+        backgroundColor: const Color(0xff0b1714),
+        foregroundColor: Colors.white,
+        title: const Text('Record truck video', style: TextStyle(fontSize: 16)),
+      ),
+      body: Column(children: [
+        Expanded(child: Center(child: _error != null
+            ? Padding(padding: const EdgeInsets.all(24), child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white)))
+            : _loading || camera == null
+                ? const CircularProgressIndicator(color: Colors.white)
+                : CameraPreview(camera))),
+        Container(
+          color: Colors.white,
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 26),
+          child: Column(children: [
+            Text(_recording ? 'Recording... tap stop when finished' : 'Record a short video of the truck', style: const TextStyle(fontSize: 11, color: Color(0xff596862))),
+            const SizedBox(height: 14),
+            SizedBox(width: double.infinity, child: FilledButton.icon(onPressed: camera == null ? null : _toggleRecording, icon: Icon(_recording ? Icons.stop : Icons.fiber_manual_record), label: Text(_recording ? 'Stop and use video' : 'Start recording'))),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
+class _VideoCaptureCard extends StatelessWidget {
+  const _VideoCaptureCard({required this.hasVideo, required this.onRecord});
+  final bool hasVideo;
+  final VoidCallback onRecord;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      key: const ValueKey('truck-video-card'),
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onRecord,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          decoration: BoxDecoration(border: Border.all(color: const Color(0xffdbe2df)), borderRadius: BorderRadius.circular(8)),
+          padding: const EdgeInsets.all(10),
+          child: Row(children: [
+          Icon(hasVideo ? Icons.check_circle : Icons.videocam_outlined, size: 16, color: const Color(0xff087866)),
+          const SizedBox(width: 8),
+          Expanded(child: Text(hasVideo ? 'Video recorded' : 'No video recorded', style: const TextStyle(fontSize: 11))),
+          TextButton(onPressed: onRecord, child: Text(hasVideo ? 'Retake' : 'Record')),
+        ]),
+        ),
+      ),
+    );
+  }
+}
+
 class _MaterialLine extends StatelessWidget {
-  const _MaterialLine({required this.name, required this.quantity});
+  const _MaterialLine({super.key, required this.name, required this.quantity, required this.onNameChanged, required this.onQuantityChanged, required this.onRemove});
   final String name;
   final String quantity;
+  final ValueChanged<String> onNameChanged;
+  final ValueChanged<String> onQuantityChanged;
+  final VoidCallback onRemove;
   @override
-  Widget build(BuildContext context) => Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(children: [Expanded(flex: 2, child: DropdownButtonFormField<String>(initialValue: name, isExpanded: true, items: ['Fish mix', 'Small fish', 'Panfret', 'Prawns', 'Squid', 'Mackerel'].map((item) => DropdownMenuItem(value: item, child: Text(item, style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))).toList(), onChanged: (_) {})), const SizedBox(width: 8), Expanded(flex: 1, child: TextFormField(initialValue: quantity, decoration: const InputDecoration(suffixText: 'Box'), keyboardType: TextInputType.number))]));
+  Widget build(BuildContext context) => Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(children: [Expanded(flex: 2, child: DropdownButtonFormField<String>(initialValue: name, isExpanded: true, items: ['Select Material', 'Fish mix', 'Small fish', 'Panfret', 'Prawns', 'Squid', 'Mackerel'].map((item) => DropdownMenuItem(value: item, child: Text(item, style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))).toList(), onChanged: (value) { if (value != null) onNameChanged(value); })), const SizedBox(width: 8), Expanded(flex: 1, child: TextFormField(initialValue: quantity, onChanged: onQuantityChanged, decoration: const InputDecoration(suffixText: 'Box'), keyboardType: TextInputType.number)), IconButton(onPressed: onRemove, tooltip: 'Remove material', icon: const Icon(Icons.close, size: 16))]));
 }
 
 class ScanPlateScreen extends StatefulWidget {
@@ -670,7 +832,7 @@ class DetailScreen extends StatelessWidget {
   const DetailScreen({super.key, required this.log});
   final TruckLog log;
   @override
-  Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Truck entry', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700))), body: ListView(padding: const EdgeInsets.all(16), children: [Container(height: 190, decoration: BoxDecoration(color: const Color(0xff10231f), borderRadius: BorderRadius.circular(8)), child: const Center(child: CircleAvatar(radius: 24, backgroundColor: Colors.white, child: Icon(Icons.play_arrow, color: Color(0xff10231f), size: 28)))), const SizedBox(height: 8), const Text('0:00 / 0:14 · uploaded 10:43 AM', style: TextStyle(fontSize: 9, color: Color(0xff72807b))), const SizedBox(height: 12), Row(children: [Text(log.plate, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, letterSpacing: 1)), const SizedBox(width: 10), const _StatusPill()]), const Divider(height: 32), _DetailRow('Party name', log.party), _DetailRow('Logged by', '${log.driver} · ${log.time}'), const SizedBox(height: 14), const Text('Materials', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)), const SizedBox(height: 6), ...log.materials.map((material) => Padding(padding: const EdgeInsets.symmetric(vertical: 7), child: Text(material, style: const TextStyle(fontSize: 11))))]));
+  Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Truck entry', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700))), body: ListView(padding: const EdgeInsets.all(16), children: [Container(height: 190, decoration: BoxDecoration(color: const Color(0xff10231f), borderRadius: BorderRadius.circular(8)), child: const Center(child: CircleAvatar(radius: 24, backgroundColor: Colors.white, child: Icon(Icons.play_arrow, color: Color(0xff10231f), size: 28)))), const SizedBox(height: 8), const Text('Video uploaded 10:43 AM', style: TextStyle(fontSize: 9, color: Color(0xff72807b))), const SizedBox(height: 12), Row(children: [Text(log.plate, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, letterSpacing: 1)), const SizedBox(width: 10), const _StatusPill()]), const Divider(height: 32), _DetailRow('Party name', log.party), _DetailRow('Logged by', '${log.driver} · ${log.time}'), const SizedBox(height: 14), const Text('Materials', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)), const SizedBox(height: 6), ...log.materials.map((material) => Padding(padding: const EdgeInsets.symmetric(vertical: 7), child: Text(material, style: const TextStyle(fontSize: 11))))]));
 }
 
 class _StatusPill extends StatelessWidget {
