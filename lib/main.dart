@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +11,22 @@ String normalizePlateText(String raw) {
   final match = RegExp(r'^([A-Z]{2})(\d{1,2})([A-Z]{1,3})(\d{3,4})$').firstMatch(compact);
   if (match == null) return raw.toUpperCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   return '${match.group(1)} ${match.group(2)} ${match.group(3)} ${match.group(4)}';
+}
+
+bool isValidIndianPlate(String value) {
+  final compact = value.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+  final regular = RegExp(r'^[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{3,4}$');
+  final bharat = RegExp(r'^\d{2}BH\d{4}[A-Z]{1,2}$');
+  return regular.hasMatch(compact) || bharat.hasMatch(compact);
+}
+
+String? extractIndianPlate(RecognizedText recognized) {
+  final candidates = recognized.blocks
+      .where((block) => block.boundingBox.width / block.boundingBox.height >= 2.2)
+      .map((block) => normalizePlateText(block.text))
+      .where(isValidIndianPlate)
+      .toList();
+  return candidates.isEmpty ? null : candidates.first;
 }
 
 void main() => runApp(const TruckLoggerApp());
@@ -290,6 +307,10 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
   String? _imagePath;
   String? _error;
   bool _capturing = false;
+  bool _streaming = false;
+  bool _processingFrame = false;
+  Rect? _livePlateBox;
+  Size? _liveImageSize;
 
   @override
   void initState() {
@@ -303,13 +324,20 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
     try {
       final cameras = await availableCameras();
       if (cameras.isEmpty) throw CameraException('No camera', 'No camera was found on this device.');
-      final camera = CameraController(cameras.first, ResolutionPreset.high, enableAudio: false);
+      final camera = CameraController(
+        cameras.first,
+        ResolutionPreset.medium,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.nv21,
+      );
       await camera.initialize();
       if (!mounted) {
         await camera.dispose();
         return;
       }
       setState(() => _camera = camera);
+      await camera.startImageStream(_processLiveFrame);
+      if (mounted) setState(() => _streaming = true);
     } on CameraException catch (exception) {
       if (mounted) setState(() => _error = exception.description ?? exception.code);
     } catch (exception) {
@@ -344,10 +372,17 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
     if (camera == null || !camera.value.isInitialized || _capturing || recognizer == null) return;
     setState(() => _capturing = true);
     try {
+      if (_streaming) {
+        await camera.stopImageStream();
+        _streaming = false;
+      }
       final image = await camera.takePicture();
       final ocrPath = await _createGuideRegionImage(image.path);
       final result = await recognizer.processImage(InputImage.fromFilePath(ocrPath));
-      final plate = normalizePlateText(result.text);
+      final plate = extractIndianPlate(result);
+      if (plate == null) {
+        throw const FormatException('No valid Indian plate found');
+      }
       if (!mounted) return;
       setState(() {
         _imagePath = image.path;
@@ -358,6 +393,54 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
     } catch (exception) {
       if (mounted) setState(() { _capturing = false; _error = 'Could not scan the plate. Try again or type it instead.'; });
     }
+  }
+
+  Future<void> _processLiveFrame(CameraImage frame) async {
+    final recognizer = _recognizer;
+    if (recognizer == null || _processingFrame || _capturing || _imagePath != null) return;
+    if (frame.format.group != ImageFormatGroup.nv21 || frame.planes.isEmpty) return;
+    _processingFrame = true;
+    try {
+      final bytes = frame.planes.first.bytes;
+      final input = InputImage.fromBytes(
+        bytes: bytes,
+        metadata: InputImageMetadata(
+          size: Size(frame.width.toDouble(), frame.height.toDouble()),
+          rotation: _imageRotation(),
+          format: InputImageFormat.nv21,
+          bytesPerRow: frame.planes.first.bytesPerRow,
+        ),
+      );
+      final result = await recognizer.processImage(input);
+      final candidates = result.blocks.where(_looksLikePlate).toList();
+      if (!mounted) return;
+      setState(() {
+        _liveImageSize = Size(frame.width.toDouble(), frame.height.toDouble());
+        _livePlateBox = candidates.isEmpty ? null : candidates.first.boundingBox;
+      });
+    } catch (_) {
+      // Live detection is best effort; capture and manual entry remain available.
+    } finally {
+      _processingFrame = false;
+    }
+  }
+
+  InputImageRotation _imageRotation() {
+    final orientation = _camera?.description.sensorOrientation ?? 90;
+    return switch (orientation) {
+      0 => InputImageRotation.rotation0deg,
+      180 => InputImageRotation.rotation180deg,
+      270 => InputImageRotation.rotation270deg,
+      _ => InputImageRotation.rotation90deg,
+    };
+  }
+
+  bool _looksLikePlate(TextBlock block) {
+    final width = block.boundingBox.width;
+    final height = block.boundingBox.height;
+    final aspectRatio = width / height;
+    final plate = normalizePlateText(block.text);
+    return aspectRatio >= 2.2 && aspectRatio <= 12 && isValidIndianPlate(plate);
   }
 
   Future<String> _createGuideRegionImage(String sourcePath) async {
@@ -383,6 +466,12 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
   void _retake() {
     _plateController?.dispose();
     setState(() { _imagePath = null; _plateController = null; _error = null; });
+    final camera = _camera;
+    if (camera != null && camera.value.isInitialized && !_streaming) {
+      camera.startImageStream(_processLiveFrame).then((_) {
+        if (mounted) setState(() => _streaming = true);
+      });
+    }
   }
 
   @override
@@ -397,17 +486,16 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
           if (_imagePath == null && _camera?.value.isInitialized == true) Positioned.fill(child: CameraPreview(_camera!)),
           if (_imagePath == null && _camera == null && _error == null) const CircularProgressIndicator(color: Colors.white),
           if (_imagePath == null && _camera == null && _error != null) Padding(padding: const EdgeInsets.all(24), child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white))),
-          if (_imagePath == null && _camera?.value.isInitialized == true) IgnorePointer(child: Container(width: 280, height: 155, decoration: BoxDecoration(border: Border.all(color: const Color(0xffffc800), width: 2), borderRadius: BorderRadius.circular(8)))),
+          if (_imagePath == null && _camera?.value.isInitialized == true) IgnorePointer(child: CustomPaint(size: Size.infinite, painter: _CameraOverlayPainter(box: _livePlateBox, imageSize: _liveImageSize, sensorOrientation: _camera!.description.sensorOrientation))),
         ])),
         Container(color: Colors.white, padding: const EdgeInsets.fromLTRB(16, 16, 16, 26), child: hasCapture ? _confirmationPanel(context) : _capturePanel(context)),
       ]),
     );
   }
-
   Widget _capturePanel(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
     const Text('Fit the whole plate inside the box', textAlign: TextAlign.center, style: TextStyle(fontSize: 10, color: Color(0xff596862))),
     const SizedBox(height: 12),
-    FilledButton.icon(onPressed: _capturing ? null : _capture, icon: const Icon(Icons.camera_alt_outlined), label: Text(_capturing ? 'Reading plate...' : 'Capture plate')),
+    FilledButton.icon(onPressed: _capturing ? null : _capture, icon: const Icon(Icons.camera_alt_outlined), label: Text(_capturing ? 'Reading plate...' : _livePlateBox == null ? 'Capture plate' : 'Plate detected · Capture')),
     if (_error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 10, color: Colors.red))),
   ]);
 
@@ -420,6 +508,52 @@ class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingOb
     const SizedBox(height: 14),
     Row(children: [Expanded(child: OutlinedButton(onPressed: _retake, child: const Text('Retake'))), const SizedBox(width: 8), Expanded(child: FilledButton(onPressed: () { final plate = _plateController!.text.trim(); if (plate.isEmpty) return; widget.onPlate(plate); Navigator.pop(context); }, child: const Text('Use this plate')))]),
   ]);
+}
+
+class _CameraOverlayPainter extends CustomPainter {
+  const _CameraOverlayPainter({required this.box, required this.imageSize, required this.sensorOrientation});
+  final Rect? box;
+  final Size? imageSize;
+  final int sensorOrientation;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final guidePaint = Paint()
+      ..color = const Color(0xffffc800)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    final detectedPaint = Paint()
+      ..color = const Color(0xff38d39f)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+
+    final guide = Rect.fromLTWH(size.width * .1, size.height * .35, size.width * .8, size.height * .3);
+    canvas.drawRRect(RRect.fromRectAndRadius(guide, const Radius.circular(8)), guidePaint);
+
+    final detected = box;
+    final source = imageSize;
+    if (detected == null || source == null || source.width == 0 || source.height == 0) return;
+    final rotated = switch (sensorOrientation) {
+      0 => detected,
+      180 => Rect.fromLTRB(source.width - detected.right, source.height - detected.bottom, source.width - detected.left, source.height - detected.top),
+      270 => Rect.fromLTRB(source.height - detected.bottom, detected.left, source.height - detected.top, detected.right),
+      _ => Rect.fromLTRB(detected.top, source.width - detected.right, detected.bottom, source.width - detected.left),
+    };
+    final rotatedSize = sensorOrientation == 90 || sensorOrientation == 270 ? Size(source.height, source.width) : source;
+    final scale = math.max(size.width / rotatedSize.width, size.height / rotatedSize.height);
+    final offsetX = (size.width - rotatedSize.width * scale) / 2;
+    final offsetY = (size.height - rotatedSize.height * scale) / 2;
+    final mapped = Rect.fromLTRB(
+      rotated.left * scale + offsetX,
+      rotated.top * scale + offsetY,
+      rotated.right * scale + offsetX,
+      rotated.bottom * scale + offsetY,
+    );
+    canvas.drawRRect(RRect.fromRectAndRadius(mapped, const Radius.circular(6)), detectedPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _CameraOverlayPainter oldDelegate) => oldDelegate.box != box || oldDelegate.imageSize != imageSize || oldDelegate.sensorOrientation != sensorOrientation;
 }
 
 class PendingUploadsScreen extends StatelessWidget {
