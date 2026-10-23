@@ -51,10 +51,21 @@ void main() {
     expect(find.text('GJ 03 BX 4417'), findsOneWidget);
   });
 
+  testWidgets('opens app information from the overflow menu', (tester) async {
+    await tester.pumpWidget(const TruckLoggerApp());
+    await tester.tap(find.byTooltip('App information'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('App information'), findsOneWidget);
+    expect(find.text('Truck logger'), findsOneWidget);
+    expect(find.text('Version 0.0.1'), findsOneWidget);
+    expect(find.byIcon(Icons.local_shipping_outlined), findsOneWidget);
+  });
+
   testWidgets('opens the date picker from Pick date', (tester) async {
     await tester.pumpWidget(const TruckLoggerApp());
     await tester.tap(find.text('Pick date'));
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.byType(DatePickerDialog), findsOneWidget);
   });

@@ -73,7 +73,7 @@ class _TruckLogScreenState extends State<TruckLogScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Truck log', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-        actions: [IconButton(tooltip: 'Pending uploads', onPressed: () => _openUploads(context), icon: const Icon(Icons.more_vert))],
+        actions: [IconButton(tooltip: 'App information', onPressed: () => _openAppInfo(context), icon: const Icon(Icons.more_vert))],
       ),
       body: SafeArea(
         child: Column(
@@ -101,6 +101,7 @@ class _TruckLogScreenState extends State<TruckLogScreen> {
   void _openNewEntry(BuildContext context) => Navigator.push(context, MaterialPageRoute(builder: (_) => const NewEntryScreen()));
   void _openUploads(BuildContext context) => Navigator.push(context, MaterialPageRoute(builder: (_) => const PendingUploadsScreen()));
   void _openDetail(BuildContext context, TruckLog log) => Navigator.push(context, MaterialPageRoute(builder: (_) => DetailScreen(log: log)));
+  void _openAppInfo(BuildContext context) => Navigator.push(context, MaterialPageRoute(builder: (_) => const AppInfoScreen()));
 
   Future<void> _pickDate(BuildContext context) async {
     final date = await showDatePicker(
@@ -131,24 +132,40 @@ class _UploadBanner extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onDismiss;
   @override
-  Widget build(BuildContext context) => Material(
-    color: Colors.transparent,
-    child: InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(color: const Color(0xffffefc9), borderRadius: BorderRadius.circular(6)),
-        child: Row(children: [
-          const Icon(Icons.cloud_upload_outlined, size: 16, color: Color(0xff9c6a00)),
-          const SizedBox(width: 8),
-          const Expanded(child: Text('2 videos still uploading', style: TextStyle(fontSize: 11, color: Color(0xff765000))),),
-          IconButton(onPressed: onDismiss, icon: const Icon(Icons.close, size: 15, color: Color(0xff765000)), padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 24, minHeight: 24)),
-        ]),
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+    height: 30,
+    child: Row(children: [
+      const SizedBox(width: 2),
+      const SizedBox(width: 14, height: 14, child: _UploadSpinner()),
+      const SizedBox(width: 7),
+      InkWell(
+        onTap: onTap,
+        child: const Text('2 videos still uploading', style: TextStyle(fontSize: 11, color: Color(0xff765000), decoration: TextDecoration.underline, decorationColor: Color(0xff765000))),
       ),
-    ),
+      const Spacer(),
+      IconButton(onPressed: onDismiss, tooltip: 'Dismiss', icon: const Icon(Icons.close, size: 15, color: Color(0xff765000)), padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 24, minHeight: 24)),
+    ]),
   );
+}
+
+class _UploadSpinner extends StatefulWidget {
+  const _UploadSpinner();
+  @override
+  State<_UploadSpinner> createState() => _UploadSpinnerState();
+}
+
+class _UploadSpinnerState extends State<_UploadSpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => RotationTransition(turns: _controller, child: const Icon(Icons.sync, size: 14, color: Color(0xff9c6a00)));
 }
 
 class _LogTile extends StatelessWidget {
@@ -257,6 +274,34 @@ class PendingUploadsScreen extends StatelessWidget {
   const PendingUploadsScreen({super.key});
   @override
   Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Pending uploads', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700))), body: ListView(padding: const EdgeInsets.all(16), children: const [_UploadItem(plate: 'GJ 03 BX 4417', progress: 'Uploading 62%', value: .62), _UploadItem(plate: 'GJ 11 T 2290', progress: 'Uploading 18%', value: .18), _UploadItem(plate: 'GJ 37 W 1184', progress: 'Failed · Retry when you’re online', value: 0, failed: true)]));
+}
+
+class AppInfoScreen extends StatelessWidget {
+  const AppInfoScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('App information', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
+    body: Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 88,
+            height: 88,
+            decoration: BoxDecoration(color: const Color(0xff10231f), borderRadius: BorderRadius.circular(20)),
+            child: const Icon(Icons.local_shipping_outlined, color: Colors.white, size: 46),
+          ),
+          const SizedBox(height: 20),
+          const Text('Truck logger', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          const Text('Version 0.0.1', style: TextStyle(fontSize: 12, color: Color(0xff72807b))),
+          const SizedBox(height: 24),
+          const Text('A simple way to record and track truck entries.', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: Color(0xff596862))),
+        ]),
+      ),
+    ),
+  );
 }
 
 class _UploadItem extends StatelessWidget {
