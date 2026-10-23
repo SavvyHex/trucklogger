@@ -1,4 +1,16 @@
+import 'dart:io';
+
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:image/image.dart' as image_tools;
+
+String normalizePlateText(String raw) {
+  final compact = raw.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+  final match = RegExp(r'^([A-Z]{2})(\d{1,2})([A-Z]{1,3})(\d{3,4})$').firstMatch(compact);
+  if (match == null) return raw.toUpperCase().replaceAll(RegExp(r'\s+'), ' ').trim();
+  return '${match.group(1)} ${match.group(2)} ${match.group(3)} ${match.group(4)}';
+}
 
 void main() => runApp(const TruckLoggerApp());
 
@@ -263,11 +275,151 @@ class _MaterialLine extends StatelessWidget {
   Widget build(BuildContext context) => Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(children: [Expanded(flex: 2, child: DropdownButtonFormField<String>(initialValue: name, isExpanded: true, items: ['Fish mix', 'Small fish', 'Panfret', 'Prawns', 'Squid', 'Mackerel'].map((item) => DropdownMenuItem(value: item, child: Text(item, style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))).toList(), onChanged: (_) {})), const SizedBox(width: 8), Expanded(flex: 1, child: TextFormField(initialValue: quantity, decoration: const InputDecoration(suffixText: 'Box'), keyboardType: TextInputType.number))]));
 }
 
-class ScanPlateScreen extends StatelessWidget {
+class ScanPlateScreen extends StatefulWidget {
   const ScanPlateScreen({super.key, required this.onPlate});
   final ValueChanged<String> onPlate;
+
   @override
-  Widget build(BuildContext context) => Scaffold(backgroundColor: const Color(0xff0b1714), appBar: AppBar(backgroundColor: const Color(0xff0b1714), foregroundColor: Colors.white, title: const Text('Scan plate', style: TextStyle(fontSize: 16))), body: Column(children: [Expanded(child: Center(child: Container(width: 250, height: 155, decoration: BoxDecoration(color: const Color(0xff11231e), borderRadius: BorderRadius.circular(8), border: Border.all(color: const Color(0xffd7aa00), width: 2)), child: const Center(child: Text('GJ 37 V 0562', style: TextStyle(color: Color(0xffffc800), fontSize: 20, fontWeight: FontWeight.w700, letterSpacing: 2)))))), Container(color: Colors.white, padding: const EdgeInsets.fromLTRB(16, 16, 16, 26), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Detected plate', style: TextStyle(fontSize: 10)), const SizedBox(height: 8), const Text('GJ 37 V 0562', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, letterSpacing: 1)), const SizedBox(height: 4), const Text('Check it matches the truck before continuing.', style: TextStyle(fontSize: 10, color: Color(0xff72807b))), const SizedBox(height: 14), Row(children: [Expanded(child: OutlinedButton(onPressed: () {}, child: const Text('Retake'))), const SizedBox(width: 8), Expanded(child: FilledButton(onPressed: () { onPlate('GJ 37 V 0562'); Navigator.pop(context); }, child: const Text('Use this plate')))])]))]));
+  State<ScanPlateScreen> createState() => _ScanPlateScreenState();
+}
+
+class _ScanPlateScreenState extends State<ScanPlateScreen> with WidgetsBindingObserver {
+  CameraController? _camera;
+  TextRecognizer? _recognizer;
+  TextEditingController? _plateController;
+  String? _imagePath;
+  String? _error;
+  bool _capturing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+    _initializeCamera();
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) throw CameraException('No camera', 'No camera was found on this device.');
+      final camera = CameraController(cameras.first, ResolutionPreset.high, enableAudio: false);
+      await camera.initialize();
+      if (!mounted) {
+        await camera.dispose();
+        return;
+      }
+      setState(() => _camera = camera);
+    } on CameraException catch (exception) {
+      if (mounted) setState(() => _error = exception.description ?? exception.code);
+    } catch (exception) {
+      if (mounted) setState(() => _error = exception.toString());
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final camera = _camera;
+    if (camera == null || !camera.value.isInitialized) return;
+    if (state == AppLifecycleState.inactive) {
+      camera.dispose();
+      _camera = null;
+    } else if (state == AppLifecycleState.resumed) {
+      _initializeCamera();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _camera?.dispose();
+    _recognizer?.close();
+    _plateController?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _capture() async {
+    final camera = _camera;
+    final recognizer = _recognizer;
+    if (camera == null || !camera.value.isInitialized || _capturing || recognizer == null) return;
+    setState(() => _capturing = true);
+    try {
+      final image = await camera.takePicture();
+      final ocrPath = await _createGuideRegionImage(image.path);
+      final result = await recognizer.processImage(InputImage.fromFilePath(ocrPath));
+      final plate = normalizePlateText(result.text);
+      if (!mounted) return;
+      setState(() {
+        _imagePath = image.path;
+        _plateController?.dispose();
+        _plateController = TextEditingController(text: plate);
+        _capturing = false;
+      });
+    } catch (exception) {
+      if (mounted) setState(() { _capturing = false; _error = 'Could not scan the plate. Try again or type it instead.'; });
+    }
+  }
+
+  Future<String> _createGuideRegionImage(String sourcePath) async {
+    final source = image_tools.decodeImage(await File(sourcePath).readAsBytes());
+    if (source == null) return sourcePath;
+
+    // The yellow guide is centered in the preview and occupies this same
+    // normalized region, independent of the camera sensor resolution.
+    final cropWidth = (source.width * .78).round();
+    final cropHeight = (source.height * .38).round();
+    final crop = image_tools.copyCrop(
+      source,
+      x: (source.width - cropWidth) ~/ 2,
+      y: (source.height - cropHeight) ~/ 2,
+      width: cropWidth,
+      height: cropHeight,
+    );
+    final ocrPath = '${sourcePath}_ocr.jpg';
+    await File(ocrPath).writeAsBytes(image_tools.encodeJpg(crop, quality: 95));
+    return ocrPath;
+  }
+
+  void _retake() {
+    _plateController?.dispose();
+    setState(() { _imagePath = null; _plateController = null; _error = null; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasCapture = _imagePath != null && _plateController != null;
+    return Scaffold(
+      backgroundColor: const Color(0xff0b1714),
+      appBar: AppBar(backgroundColor: const Color(0xff0b1714), foregroundColor: Colors.white, title: const Text('Scan plate', style: TextStyle(fontSize: 16))),
+      body: Column(children: [
+        Expanded(child: Stack(alignment: Alignment.center, children: [
+          if (_imagePath != null) Positioned.fill(child: Image.file(File(_imagePath!), fit: BoxFit.cover)),
+          if (_imagePath == null && _camera?.value.isInitialized == true) Positioned.fill(child: CameraPreview(_camera!)),
+          if (_imagePath == null && _camera == null && _error == null) const CircularProgressIndicator(color: Colors.white),
+          if (_imagePath == null && _camera == null && _error != null) Padding(padding: const EdgeInsets.all(24), child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white))),
+          if (_imagePath == null && _camera?.value.isInitialized == true) IgnorePointer(child: Container(width: 280, height: 155, decoration: BoxDecoration(border: Border.all(color: const Color(0xffffc800), width: 2), borderRadius: BorderRadius.circular(8)))),
+        ])),
+        Container(color: Colors.white, padding: const EdgeInsets.fromLTRB(16, 16, 16, 26), child: hasCapture ? _confirmationPanel(context) : _capturePanel(context)),
+      ]),
+    );
+  }
+
+  Widget _capturePanel(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+    const Text('Fit the whole plate inside the box', textAlign: TextAlign.center, style: TextStyle(fontSize: 10, color: Color(0xff596862))),
+    const SizedBox(height: 12),
+    FilledButton.icon(onPressed: _capturing ? null : _capture, icon: const Icon(Icons.camera_alt_outlined), label: Text(_capturing ? 'Reading plate...' : 'Capture plate')),
+    if (_error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 10, color: Colors.red))),
+  ]);
+
+  Widget _confirmationPanel(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    const Text('Detected plate', style: TextStyle(fontSize: 10)),
+    const SizedBox(height: 8),
+    TextField(controller: _plateController, textCapitalization: TextCapitalization.characters, decoration: const InputDecoration(hintText: 'Type plate number')),
+    const SizedBox(height: 6),
+    const Text('Check it matches the truck before continuing.', style: TextStyle(fontSize: 10, color: Color(0xff72807b))),
+    const SizedBox(height: 14),
+    Row(children: [Expanded(child: OutlinedButton(onPressed: _retake, child: const Text('Retake'))), const SizedBox(width: 8), Expanded(child: FilledButton(onPressed: () { final plate = _plateController!.text.trim(); if (plate.isEmpty) return; widget.onPlate(plate); Navigator.pop(context); }, child: const Text('Use this plate')))]),
+  ]);
 }
 
 class PendingUploadsScreen extends StatelessWidget {

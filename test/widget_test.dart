@@ -11,6 +11,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:trucklogger/main.dart';
 
 void main() {
+  test('normalizes OCR plate text', () {
+    expect(normalizePlateText('gj-37-v-0562'), 'GJ 37 V 0562');
+    expect(normalizePlateText('  GJ 11 T 2290\n'), 'GJ 11 T 2290');
+  });
+
   testWidgets('shows the truck log list and upload summary', (tester) async {
     await tester.pumpWidget(const TruckLoggerApp());
 
